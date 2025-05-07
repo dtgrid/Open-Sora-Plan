@@ -168,7 +168,28 @@ class DecordDecoder(object):
         except Exception as e:
             print('get_batch execption:', e)
             return None
-        
+
+class MaskDecoder(object):
+    def __init__(self, mask_dir_path):
+        self.mask_dir_path = mask_dir_path
+
+    def get_mask(self, frame_indices):
+        try:
+            mask_frames = []
+            for frame_idx in frame_indices:
+                mask_path = os.path.join(self.mask_dir_path, f"frame_{frame_idx:04d}.png")
+                mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+                if mask is None:
+                    print(f'Failed to read mask: {mask_path}')
+                    return None
+                mask = torch.from_numpy(mask).unsqueeze(2)  # Add channel dimension
+                mask_frames.append(mask)
+            mask_data = torch.stack(mask_frames)  # Shape: [T, H, W, 1]
+            return mask_data
+        except Exception as e:
+            print('get_mask exception:', e)
+            return None
+
 class T2V_dataset(Dataset):
     def __init__(self, args, transform, temporal_sample, tokenizer_1, tokenizer_2):
         self.data = args.data
@@ -214,7 +235,7 @@ class T2V_dataset(Dataset):
         dataset_prog.set_cap_list(args.dataloader_num_workers, cap_list, n_elements)
         print(f"Data length: {len(dataset_prog.cap_list)}")
         self.executor = ThreadPoolExecutor(max_workers=1)
-        self.timeout = 60
+        self.timeout = 180
 
     def set_checkpoint(self, n_used_elements):
         for i in range(len(dataset_prog.n_used_elements)):
@@ -567,6 +588,7 @@ class T2V_dataset(Dataset):
     
     def decord_read(self, video_data):
         path = video_data['path']
+        mask_dir_path = os.path.join(os.path.dirname(path), video_data['mask_images'])
         predefine_frame_indice = video_data['sample_frame_index']
         start_frame_idx = video_data['start_frame_idx']
         clip_total_frames = video_data['num_frames']
@@ -576,6 +598,7 @@ class T2V_dataset(Dataset):
         predefine_num_frames = len(predefine_frame_indice)
         # decord_vr = decord.VideoReader(path, ctx=decord.cpu(0), num_threads=1)
         decord_vr = DecordDecoder(path)
+        decord_mask = MaskDecoder(mask_dir_path)
 
         frame_indices = self.get_actual_frame(
             fps, start_frame_idx, clip_total_frames, path, predefine_num_frames, predefine_frame_indice
@@ -590,9 +613,14 @@ class T2V_dataset(Dataset):
                 video_data = video_data[:, :, s_y: e_y, s_x: e_x]
         else:
             raise ValueError(f'Get video_data {video_data}')
+        mask_data = decord_mask.get_mask(frame_indices)
+        if mask_data is not None:
+            mask_data = mask_data.permute(0, 3, 1, 2)  # (T, H, W, C) -> (T C H W)
+            if s_y is not None:
+                mask_data = mask_data[:, :, s_y: e_y, s_x: e_x]
         # del decord_vr
         # gc.collect()
-        return video_data
+        return video_data, mask_data
     
     def opencv_read(self, video_data):
         path = video_data['path']

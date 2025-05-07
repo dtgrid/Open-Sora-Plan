@@ -24,6 +24,7 @@ class MaskType(Enum):
     continuation = auto() # Only for video, execute video continuation (i.e. maintain the starting k frames and mask the rest)
     clear = auto() # For video and image, all frames are not masked
     random_temporal = auto() # For video, randomly mask some frames
+    segment = auto() # For video, mask the frames in the segment
 
 TYPE_TO_STR = {mask_type: mask_type.name for mask_type in MaskType}
 STR_TO_TYPE = {mask_type.name: mask_type for mask_type in MaskType}
@@ -50,32 +51,32 @@ def read_video(video_path):
 
 class BaseMaskGenerator(ABC):
 
-    def create_system_mask(self, num_frames, height, width, device, dtype):
+    def create_system_mask(self, num_frames, height, width, device, dtype, video_mask=None):
         if num_frames is None or height is None or width is None:
             raise ValueError('num_frames, height, and width should be provided.')
         return torch.ones([num_frames, 1, height, width], device=device, dtype=dtype)
 
     @abstractmethod
-    def process(self, mask):
+    def process(self, mask, video_mask):
         # process self.mask to meet the specific task
         pass
 
-    def __call__(self, num_frames=None, height=None, width=None, device='cuda', dtype=torch.float32):
-        mask = self.create_system_mask(num_frames, height, width, device, dtype)
-        return self.process(mask)
+    def __call__(self, num_frames=None, height=None, width=None, device='cuda', dtype=torch.float32, video_mask=None):
+        mask = self.create_system_mask(num_frames, height, width, device, dtype, video_mask)
+        return self.process(mask, video_mask)
 
 class T2IVMaskGenerator(BaseMaskGenerator):
-    def process(self, mask):
+    def process(self, mask, video_mask):
         mask.fill_(1)
         return mask
 
 class I2VMaskGenerator(BaseMaskGenerator):
-    def process(self, mask):
+    def process(self, mask, video_mask):
         mask[0] = 0
         return mask
 
 class TransitionMaskGenerator(BaseMaskGenerator):
-    def process(self, mask):
+    def process(self, mask, video_mask):
         mask[0] = 0
         mask[-1] = 0
         return mask
@@ -89,14 +90,14 @@ class ContinuationMaskGenerator(BaseMaskGenerator):
         self.min_clear_ratio = min_clear_ratio
         self.max_clear_ratio = max_clear_ratio
 
-    def process(self, mask):
+    def process(self, mask, video_mask):
         num_frames = mask.shape[0]
         end_idx = random.randint(floor(num_frames * self.min_clear_ratio), ceil(num_frames * self.max_clear_ratio))
         mask[0:end_idx] = 0
         return mask
 
 class ClearMaskGenerator(BaseMaskGenerator):
-    def process(self, mask):
+    def process(self, mask, video_mask):
         mask.zero_()
         return mask
 
@@ -109,13 +110,18 @@ class RandomTemporalMaskGenerator(BaseMaskGenerator):
         self.min_clear_ratio = min_clear_ratio
         self.max_clear_ratio = max_clear_ratio
 
-    def process(self, mask):
+    def process(self, mask, video_mask):
         num_frames = mask.shape[0]
         num_to_select = random.randint(floor(num_frames * self.min_clear_ratio), ceil(num_frames * self.max_clear_ratio))
         selected_indices = random.sample(range(num_frames), num_to_select)
         mask[selected_indices] = 0
         return mask
 
+class SegmentMaskGenerator(BaseMaskGenerator):
+    def process(self, mask, video_mask):
+        if video_mask is not None:
+            mask[video_mask < 125] = 0
+        return mask
 
 class MaskProcessor:
     def __init__(
@@ -123,7 +129,7 @@ class MaskProcessor:
         max_height=640, 
         max_width=640, 
         min_clear_ratio=0.0, 
-        max_clear_ratio=1.0, 
+        max_clear_ratio=1.0
     ):
         
         self.max_height = max_height
@@ -141,12 +147,13 @@ class MaskProcessor:
             MaskType.continuation: ContinuationMaskGenerator(min_clear_ratio=self.min_clear_ratio, max_clear_ratio=self.max_clear_ratio),
             MaskType.clear: ClearMaskGenerator(),
             MaskType.random_temporal: RandomTemporalMaskGenerator(min_clear_ratio=self.min_clear_ratio, max_clear_ratio=self.max_clear_ratio),
+            MaskType.segment: SegmentMaskGenerator(),
         }
     
-    def get_mask(self, mask_generator_type, num_frames, height, width, device='cuda', dtype=torch.float32):
-        return self.mask_generators[mask_generator_type](num_frames, height, width, device=device, dtype=dtype)
+    def get_mask(self, mask_generator_type, num_frames, height, width, device='cuda', dtype=torch.float32, video_mask=None):
+        return self.mask_generators[mask_generator_type](num_frames, height, width, device=device, dtype=dtype, video_mask=video_mask)
     
-    def __call__(self, pixel_values, mask_type=None, mask_type_ratio_dict=None):
+    def __call__(self, pixel_values, mask_type=None, mask_type_ratio_dict=None, video_mask=None):
 
         num_frames, _, height, width = pixel_values.shape   
 
@@ -160,7 +167,7 @@ class MaskProcessor:
         else:
             raise ValueError('mask_type or mask_type_ratio_dict should be provided.')
         
-        mask = self.get_mask(mask_generator_type, num_frames, height, width, device=pixel_values.device, dtype=pixel_values.dtype)
+        mask = self.get_mask(mask_generator_type, num_frames, height, width, device=pixel_values.device, dtype=pixel_values.dtype, video_mask=video_mask)
 
         masked_pixel_values = pixel_values * (mask < 0.5)
         return dict(mask=mask, masked_pixel_values=masked_pixel_values)

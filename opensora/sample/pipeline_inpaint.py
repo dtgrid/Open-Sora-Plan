@@ -9,6 +9,7 @@ import torch
 from einops import rearrange
 from PIL import Image
 import decord
+import glob
 
 from transformers import CLIPTextModelWithProjection, CLIPTokenizer, CLIPImageProcessor, MT5Tokenizer, T5EncoderModel
 import torch.nn.functional as F
@@ -83,6 +84,11 @@ def get_pixel_values(file_path, num_frames):
         pixel_values = [open_video(video_path, 0, num_frames) for video_path in file_path]
     return pixel_values
 
+def get_video_mask(mask_dir_path, num_frames):
+    pixel_values = [open_image(path) for path in sorted(glob.glob(os.path.join(mask_dir_path, '*.png'))[:num_frames])]
+    pixel_values = [torch.from_numpy(np.array(image)) for image in pixel_values]
+    pixel_values = [rearrange(image, 'h w c -> c h w').unsqueeze(0) for image in pixel_values]
+    return pixel_values
 
 class OpenSoraInpaintPipeline(OpenSoraPipeline):
 
@@ -140,10 +146,7 @@ class OpenSoraInpaintPipeline(OpenSoraPipeline):
         else:
             if not isinstance(conditional_pixel_values_path, list) or not isinstance(conditional_pixel_values_path[0], str):
                 raise ValueError("conditional_pixel_values_path should be a list of strings")
-    
-        if not is_image_file(conditional_pixel_values_path[0]) and not is_video_file(conditional_pixel_values_path[0]):
-            raise ValueError("conditional_pixel_values_path should be an image or video file path")  
-        
+
         if is_video_file(conditional_pixel_values_path[0]) and len(conditional_pixel_values_path) > 1:
             raise ValueError("conditional_pixel_values_path should be a list of image file paths or a single video file path")
         
@@ -246,7 +249,8 @@ class OpenSoraInpaintPipeline(OpenSoraPipeline):
         width, 
         video_transform,
         weight_dtype,
-        device
+        device,
+        video_mask
     ):
         if device is None:
             device = getattr(self, '_execution_device', None) or getattr(self, 'device', None) or torch.device('cuda')
@@ -254,7 +258,7 @@ class OpenSoraInpaintPipeline(OpenSoraPipeline):
         conditional_pixel_values = conditional_pixel_values.to(device=device, dtype=weight_dtype)
 
         if conditional_pixel_values.shape[0] == num_frames:
-            inpaint_cond_data = self.mask_processor(conditional_pixel_values, mask_type=mask_type)
+            inpaint_cond_data = self.mask_processor(conditional_pixel_values, mask_type=mask_type, video_mask=video_mask)
             masked_pixel_values, mask = inpaint_cond_data['masked_pixel_values'], inpaint_cond_data['mask']
         else:
             input_pixel_values = torch.zeros([num_frames, 3, height, width], device=device, dtype=weight_dtype)
@@ -326,6 +330,7 @@ class OpenSoraInpaintPipeline(OpenSoraPipeline):
         guidance_rescale: float = 0.0,
         max_sequence_length: int = 512,
         device = None, 
+        mask_dir_path: Optional[str] = None,
     ):
         
         if isinstance(callback_on_step_end, (PipelineCallback, MultiPipelineCallbacks)):
@@ -423,10 +428,11 @@ class OpenSoraInpaintPipeline(OpenSoraPipeline):
         # ==================prepare inpaint data=====================================
         if noise_strength != 0:
             self.noise_adder = GaussianNoiseAdder(mean=np.log(noise_strength), std=0.01, clear_ratio=0)
-
+        
         mask_type, conditional_pixel_values_indices = self.get_mask_type_cond_indices(mask_type, conditional_pixel_values_path, conditional_pixel_values_indices, num_frames)
 
         conditional_pixel_values = get_pixel_values(conditional_pixel_values_path, num_frames)
+        video_mask = get_video_mask(mask_dir_path, num_frames)
 
         min_height = min([pixels.shape[2] for pixels in conditional_pixel_values])
         min_width = min([pixels.shape[3] for pixels in conditional_pixel_values])
@@ -442,6 +448,8 @@ class OpenSoraInpaintPipeline(OpenSoraPipeline):
 
         video_transform = self.get_video_transform()
         conditional_pixel_values = torch.cat([resize_transform(pixels) for pixels in conditional_pixel_values])
+        video_mask = torch.cat([resize_transform(mask) for mask in video_mask])
+        video_mask = video_mask[:, 0:1, :, :]
         real_height, real_width = conditional_pixel_values.shape[-2], conditional_pixel_values.shape[-1]
         # ==================prepare inpaint data=====================================
         
@@ -480,7 +488,8 @@ class OpenSoraInpaintPipeline(OpenSoraPipeline):
             real_width,
             video_transform,
             prompt_embeds.dtype,
-            device
+            device,
+            video_mask
         )
         # ==============================create mask=====================================
 

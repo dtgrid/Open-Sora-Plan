@@ -282,6 +282,7 @@ def run_model_and_save_samples(args, pipeline, caption_refiner_model=None, enhan
                 guidance_scale=args.guidance_scale,
                 num_samples_per_prompt=args.num_samples_per_prompt,
                 max_sequence_length=args.max_sequence_length,
+                mask_dir_path=args.mask_dir_path
             ).videos
         else:
             videos = pipeline(

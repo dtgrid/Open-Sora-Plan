@@ -137,7 +137,7 @@ class Inpaint_dataset(T2V_dataset):
         sample_w = video_data['resolution']['sample_width']
         
         if self.video_reader == 'decord':
-            video = self.decord_read(video_data)
+            video, video_mask = self.decord_read(video_data)
         elif self.video_reader == 'opencv':
             video = self.opencv_read(video_data)
         else:
@@ -146,8 +146,9 @@ class Inpaint_dataset(T2V_dataset):
 
         video = self.resize_transform(video)  # T C H W -> T C H W
         assert video.shape[2] == sample_h and video.shape[3] == sample_w, f'sample_h ({sample_h}), sample_w ({sample_w}), video ({video.shape}), video_path ({video_path})'
+        video_mask = self.resize_transform(video_mask)  # T C H W -> T C H W
 
-        inpaint_cond_data = self.mask_processor(video, mask_type_ratio_dict=self.mask_type_ratio_dict_video)
+        inpaint_cond_data = self.mask_processor(video, mask_type_ratio_dict=self.mask_type_ratio_dict_video, video_mask=video_mask)
         mask, masked_video = inpaint_cond_data['mask'], inpaint_cond_data['masked_pixel_values']
 
         video = self.transform(video)  # T C H W -> T C H W
